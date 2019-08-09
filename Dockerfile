@@ -1,6 +1,7 @@
 # Multi-stage build - See https://docs.docker.com/engine/userguide/eng-image/multistage-build
 FROM ubnt/unms:0.14.2 as unms
 FROM ubnt/unms-netflow:0.14.2 as unms-netflow
+FROM ubnt/unms-crm:3.0.0-beta.6 as unms-crm
 FROM oznu/s6-node:10.15.1-debian-amd64
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -14,7 +15,8 @@ RUN set -x \
   && apt-get install -y build-essential rabbitmq-server redis-server \
     postgresql-9.6 postgresql-contrib-9.6 postgresql-client-9.6 libpq-dev \
     gzip bash vim openssl libcap-dev dumb-init sudo gettext zlibc zlib1g zlib1g-dev \
-    iproute2 netcat wget libpcre3 libpcre3-dev libssl-dev git \
+    iproute2 netcat wget libpcre3 libpcre3-dev libssl-dev git pkg-config \
+	libcurl4-openssl-dev libxml2-dev libedit-dev libsodium-dev libargon2-0-dev jq \
   && apt-get install -y certbot -t stretch-backports
 
 # start ubnt/unms dockerfile #
@@ -50,11 +52,18 @@ RUN cd /home/app/netflow \
 
 # end unms-netflow dockerfile #
 
+# start unms-crm dockerfile #
+RUN mkdir -p /usr/src/ucrm
+
+COPY --from=unms-crm /usr/src/ucrm /usr/src/ucrm
+# end unms-crm dockerfile #
+
 # ubnt/nginx docker file #
 ENV NGINX_UID=1000 \
     NGINX_VERSION=nginx-1.14.2 \
     LUAJIT_VERSION=2.1.0-beta3 \
-    LUA_NGINX_VERSION=0.10.13
+    LUA_NGINX_VERSION=0.10.13 \
+	PHP_VERSION=php-7.2.19
 
 RUN set -x \
     && mkdir -p /tmp/src && cd /tmp/src \
@@ -62,10 +71,12 @@ RUN set -x \
     && wget -q https://github.com/openresty/lua-nginx-module/archive/v${LUA_NGINX_VERSION}.tar.gz -O lua-nginx-module.tar.gz \
     && wget -q https://github.com/simpl/ngx_devel_kit/archive/v0.3.0.tar.gz -O ndk.tar.gz \
     && wget -q http://luajit.org/download/LuaJIT-${LUAJIT_VERSION}.tar.gz -O luajit.tar.gz \
+	&& wget -q https://www.php.net/get/${PHP_VERSION}.tar.xz/from/this/mirror -O php.tar.xz \
     && tar -zxvf lua-nginx-module.tar.gz \
     && tar -zxvf ndk.tar.gz \
     && tar -zxvf luajit.tar.gz \
     && tar -zxvf nginx.tar.gz \
+	&& tar -xvf php.tar.xz \
     && cd /tmp/src/LuaJIT-${LUAJIT_VERSION} && make amalg PREFIX='/usr' && make install PREFIX='/usr' \
     && export LUAJIT_LIB=/usr/lib/libluajit-5.1.so && export LUAJIT_INC=/usr/include/luajit-2.1 \
     && cd /tmp/src/${NGINX_VERSION} && ./configure \
@@ -85,7 +96,6 @@ RUN set -x \
         --without-http_memcached_module \
         --without-http_auth_basic_module \
         --without-http_userid_module \
-        --without-http_fastcgi_module \
         --without-http_uwsgi_module \
         --without-http_scgi_module \
         --prefix=/var/lib/nginx \
@@ -97,6 +107,26 @@ RUN set -x \
         --pid-path=/tmp/nginx.pid \
         --http-client-body-temp-path=/tmp/body \
         --http-proxy-temp-path=/tmp/proxy \
+    && make -j $(nproc) \
+    && make install \
+    && cd /tmp/src/${PHP_VERSION} && ./configure \
+	    --with-config-file-path="/usr/local/etc/php" \
+        --with-config-file-scan-dir="/usr/local/etc/php/conf.d" \
+        --enable-option-checking=fatal \
+        --with-mhash \
+        --enable-ftp \
+        --enable-mbstring \
+        --enable-mysqlnd \
+        --with-password-argon2 \
+        --with-sodium=shared \
+        --with-curl \
+        --with-libedit \
+        --with-openssl \
+        --with-zlib \
+        --enable-fpm \
+        --with-fpm-user=www-data \
+        --with-fpm-group=www-data \
+        --disable-cgi \
     && make -j $(nproc) \
     && make install \
     && rm /usr/bin/luajit-${LUAJIT_VERSION} \
